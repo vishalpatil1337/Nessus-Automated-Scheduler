@@ -259,6 +259,113 @@ del nessus_scheduler.log.*
 **Total space:** ~30 MB (then it cleans itself)
 
 ---
+## 🎓 Tutorial: Three Steps to Automation Glory
+
+### Step 1: Feed It Your Credentials 🔑
+
+Open the script and plug in your Nessus login. It's around line 20-ish:
+```python
+NESSUS_URL = "https://127.0.0.1:8834"
+USERNAME = "YourUsername"      # ← Change this
+PASSWORD = "YourPassword"      # ← And this
+```
+
+**Pro tip:** Don't leave it as "admin/admin" unless you enjoy chaos. 🔥
+
+<img width="1218" height="334" alt="image" src="https://github.com/user-attachments/assets/7bccf7a0-83b3-4af1-b8ca-58a3dc82ea9b" />
+
+---
+
+### Step 2: The Great API Token Hunt 🕵️
+
+Run the script. It'll either:
+- ✅ **Auto-grab the token** (you lucky duck, skip to Step 3)
+- ❌ **Ask you for it manually** (welcome to the fun part)
+
+**If it asks, here's what to do:**
+
+1. Open Nessus in your browser
+2. Hit `F12` (opens Developer Tools like a hacker 😎)
+3. Click the **Network** tab
+4. Click around in Nessus (any scan, any button)
+5. Look for requests in the list → Click one → Find **Headers** tab
+6. Scroll to **Request Headers** → Copy the `X-API-Token` value
+
+**It looks like:** `a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`
+
+Paste that bad boy when the script asks. Done. 🎉
+
+<img width="2530" height="1225" alt="image" src="https://github.com/user-attachments/assets/538d8efb-cacc-4e7d-b18d-17e0f754791f" />
+
+**Why?** The API token is your VIP pass. No token = no entry = sad you.
+
+---
+
+### Step 3: Schedule Your Scans 📅
+
+Now the fun part - tell scans what to do and when.
+
+#### 🎮 Option A: Manual Mode (Easy & Interactive)
+```bash
+python nessus_scheduler.py --setup
+```
+
+Follow the prompts:
+- Pick a scan ID
+- Choose action (Launch/Pause/Resume/Stop)
+- Set the time (24-hour format: `09:00`, `14:30`, etc.)
+- Add more schedules or type `done`
+
+**Example:**
+```
+Scan ID: 45
+Action: 2 (Pause)
+Time: 12:00
+✅ Added!
+
+Type 'done' when finished.
+```
+
+#### 🪟 Option B: Windows Task Scheduler (Set & Forget)
+
+**For the "I want this to run forever without me" crowd:**
+
+1. **Open CMD as Administrator** (right-click → Run as Administrator)
+2. Run this:
+```bash
+python nessus_scheduler.py --create-task
+```
+3. Type `3` for "Create Windows Task Scheduler"
+4. It installs itself. You're done. Go home. 🏠
+
+<img width="1389" height="1326" alt="image" src="https://github.com/user-attachments/assets/8eaef470-ed02-4861-87a7-15acdae49db7" />
+
+**What happens:** Windows will now run your schedules automatically, forever, even if you forget they exist. 
+
+**Verify it worked:**
+- Press `Win + R`
+- Type: `taskschd.msc`
+- Look for task named **"NessusScheduler"**
+- See it? You're a wizard now. 🧙‍♂️
+
+---
+
+### 🎬 You're Done!
+
+**Manual mode:** Script runs when you run it  
+**Task Scheduler mode:** Script runs itself forever (check logs weekly to feel important)
+
+**Check logs anytime:**
+```bash
+type nessus_scheduler.log
+```
+
+**Your scans now:** Automated AF 🤖  
+**You now:** Free to do literally anything else ☕
+
+---
+
+---
 
 ## 🎓 Pro Tips From The Trenches
 

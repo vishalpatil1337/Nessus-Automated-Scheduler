@@ -38,8 +38,8 @@ pip install pywin32
 
 1. **Clone or download** the script
 ```bash
-git clone 
-cd nessus-scheduler
+git clone https://github.com/vishalpatil1337/Nessus-Automated-Scheduler
+cd Nessus-Automated-Scheduler
 ```
 
 

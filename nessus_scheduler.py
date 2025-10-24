@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Nessus Automated Scheduler - Fixed Version v4.1
-Added: Automatic retry for missed scans within 10-minute window
+Nessus Automated Scheduler - Professional Edition v4.2
+Author: Security Automation Team
+Description: Automated scheduling system for Nessus vulnerability scans with 
+             intelligent retry logic and persistent task tracking.
+License: MIT
 """
 
 import requests
@@ -21,12 +24,15 @@ from logging.handlers import RotatingFileHandler
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Configuration
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 NESSUS_URL = "https://127.0.0.1:8834"
 USERNAME = "Nessus_Username"    # Enter Nessus Username Here
 PASSWORD = "Nessus_Password"    # Enter Nessus Password Here
 CONFIG_FILE = "nessus_config.json"
 SCHEDULE_FILE = "nessus_schedule.json"
+EXECUTED_TASKS_FILE = "executed_tasks.json"
 
 # Timing Configuration
 CHECK_INTERVAL_URGENT = 10      # 10 seconds when task within 5 minutes
@@ -42,19 +48,62 @@ LOG_FILE = "nessus_scheduler.log"
 MAX_LOG_SIZE = 5 * 1024 * 1024  # 5 MB
 LOG_BACKUP_COUNT = 5
 
+# Version
+VERSION = "4.2"
+
+# ============================================================================
+# ASCII LOGO
+# ============================================================================
+LOGO = r"""
+  _   _                           _____      _              _       _           
+ | \ | |                         / ____|    | |            | |     | |          
+ |  \| | ___  ___ ___ _   _ ___ | (___   ___| |__   ___  __| |_   _| | ___ _ __ 
+ | . ` |/ _ \/ __/ __| | | / __|  \___ \ / __| '_ \ / _ \/ _` | | | | |/ _ \ '__|
+ | |\  |  __/\__ \__ \ |_| \__ \  ____) | (__| | | |  __/ (_| | |_| | |  __/ |   
+ |_| \_|\___||___/___/\__,_|___/ |_____/ \___|_| |_|\___|\__,_|\__,_|_|\___|_|   
+                                                                                  
+          Automated Vulnerability Scan Scheduling System v{version}
+"""
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+def print_banner(title, char='=', width=80):
+    """Print a formatted banner"""
+    print(char * width)
+    print(title.center(width))
+    print(char * width)
+
+def print_section(title, width=80):
+    """Print a section header"""
+    print("\n" + "=" * width)
+    print(title)
+    print("=" * width)
+
+def print_subsection(title, width=80):
+    """Print a subsection header"""
+    print("\n" + "-" * width)
+    print(title)
+    print("-" * width)
+
+# ============================================================================
+# MAIN SCHEDULER CLASS
+# ============================================================================
 class NessusScheduler:
     def __init__(self):
         self.cookie_token = None
         self.api_token = None
         self.schedules = []
         self.executed_tasks = set()
-        self.missed_tasks = {}  # Track missed tasks with timestamp
+        self.missed_tasks = {}
         self.scan_completion_status = {}
         self.running = True
         self.last_log_time = 0
         self.monitor_thread = None
+        self.last_execution_times = {}
         self.setup_logging()
         self.load_or_create_config()
+        self.load_executed_tasks()
     
     def setup_logging(self):
         """Setup rotating log file handler"""
@@ -62,7 +111,7 @@ class NessusScheduler:
         self.logger.setLevel(logging.INFO)
         self.logger.handlers = []
         
-        # File handler
+        # File handler with rotation
         file_handler = RotatingFileHandler(
             LOG_FILE,
             maxBytes=MAX_LOG_SIZE,
@@ -75,7 +124,10 @@ class NessusScheduler:
         console_handler.setLevel(logging.INFO)
         
         # Formatter
-        formatter = logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+        formatter = logging.Formatter(
+            '[%(asctime)s] %(message)s', 
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
         file_handler.setFormatter(formatter)
         console_handler.setFormatter(formatter)
         
@@ -87,10 +139,51 @@ class NessusScheduler:
         self.logger.info(message)
         sys.stdout.flush()
     
-    def print_separator(self, char='='):
+    def print_separator(self, char='=', width=80):
         """Print separator line"""
-        line = char * 80
+        line = char * width
         self.log(line)
+    
+    def load_executed_tasks(self):
+        """Load executed tasks from persistent storage"""
+        if os.path.exists(EXECUTED_TASKS_FILE):
+            try:
+                with open(EXECUTED_TASKS_FILE, 'r') as f:
+                    data = json.load(f)
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    
+                    # Only load today's tasks
+                    self.executed_tasks = {
+                        task for task in data.get('executed_tasks', [])
+                        if task.startswith(today)
+                    }
+                    self.last_execution_times = data.get('last_execution_times', {})
+                    
+                    # Clean old entries from last_execution_times
+                    self.last_execution_times = {
+                        k: v for k, v in self.last_execution_times.items()
+                        if k.startswith(today)
+                    }
+                    
+                    if self.executed_tasks:
+                        self.log(f"Loaded {len(self.executed_tasks)} completed task(s) from disk")
+            except Exception as e:
+                self.log(f"Error loading executed tasks: {e}")
+                self.executed_tasks = set()
+                self.last_execution_times = {}
+    
+    def save_executed_tasks(self):
+        """Save executed tasks to persistent storage"""
+        try:
+            data = {
+                'executed_tasks': list(self.executed_tasks),
+                'last_execution_times': self.last_execution_times,
+                'last_updated': datetime.now().isoformat()
+            }
+            with open(EXECUTED_TASKS_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            self.log(f"Error saving executed tasks: {e}")
     
     def load_or_create_config(self):
         """Load existing config or create new one"""
@@ -115,9 +208,7 @@ class NessusScheduler:
     
     def login_and_detect_api_key(self):
         """Login and auto-detect API key"""
-        self.print_separator()
-        self.log("AUTHENTICATION")
-        self.print_separator()
+        print_section("AUTHENTICATION")
         print(f"Logging in as: {USERNAME}")
         
         try:
@@ -331,6 +422,7 @@ class NessusScheduler:
                 if response.status_code == 200:
                     self.log(f"SUCCESS! Scan {scan_id} {action}ed successfully")
                     self.print_separator()
+                    time.sleep(2)
                     return True
                 elif response.status_code == 401:
                     self.log("Session expired, re-authenticating...")
@@ -383,18 +475,26 @@ class NessusScheduler:
         """Calculate minutes until next scheduled task"""
         now = datetime.now()
         current_minutes = now.hour * 60 + now.minute
+        today_date = now.strftime('%Y-%m-%d')
         
         min_diff = float('inf')
         next_task_info = None
         
         for schedule in self.schedules:
+            scan_id = schedule['scan_id']
             scheduled_time = schedule['time']
+            action = schedule['action']
+            
+            task_id = f"{today_date}_{scan_id}_{scheduled_time}_{action}"
+            if task_id in self.executed_tasks:
+                continue
+            
             hour, minute = map(int, scheduled_time.split(':'))
             scheduled_minutes = hour * 60 + minute
             
             diff = scheduled_minutes - current_minutes
             if diff < 0:
-                diff += 1440  # Next day
+                diff += 1440
             
             if diff < min_diff:
                 min_diff = diff
@@ -405,7 +505,6 @@ class NessusScheduler:
     def get_pending_tasks_display(self):
         """Get display of all pending tasks for today"""
         now = datetime.now()
-        current_time_str = now.strftime('%H:%M')
         today_date = now.strftime('%Y-%m-%d')
         
         pending_tasks = []
@@ -418,11 +517,9 @@ class NessusScheduler:
             
             task_id = f"{today_date}_{scan_id}_{scheduled_time}_{action}"
             
-            # Skip if already executed
             if task_id in self.executed_tasks:
                 continue
             
-            # Check if task is in future
             scheduled_hour, scheduled_minute = map(int, scheduled_time.split(':'))
             current_hour = now.hour
             current_minute = now.minute
@@ -442,12 +539,12 @@ class NessusScheduler:
         return sorted(pending_tasks, key=lambda x: x['minutes_until'])
     
     def check_missed_tasks(self):
-        """Check for missed tasks within the retry window and attempt to execute them"""
+        """Check for missed tasks within the retry window"""
         now = datetime.now()
         today_date = now.strftime('%Y-%m-%d')
         current_minutes = now.hour * 60 + now.minute
         
-        # Clean up old missed tasks that are beyond retry window
+        # Clean up old missed tasks beyond retry window
         expired_tasks = []
         for task_id, task_info in self.missed_tasks.items():
             minutes_since_missed = (now - task_info['missed_time']).total_seconds() / 60
@@ -467,20 +564,16 @@ class NessusScheduler:
             
             task_id = f"{today_date}_{scan_id}_{scheduled_time}_{action}"
             
-            # Skip if already executed
             if task_id in self.executed_tasks:
                 continue
             
-            # Calculate time difference
             scheduled_hour, scheduled_minute = map(int, scheduled_time.split(':'))
             scheduled_minutes = scheduled_hour * 60 + scheduled_minute
             
             time_diff = current_minutes - scheduled_minutes
             
-            # If task is past due but within retry window
             if 0 < time_diff <= RETRY_WINDOW_MINUTES:
                 if task_id not in self.missed_tasks:
-                    # New missed task detected
                     self.missed_tasks[task_id] = {
                         'scan_id': scan_id,
                         'scan_name': scan_name,
@@ -507,6 +600,10 @@ class NessusScheduler:
         today_date = now.strftime('%Y-%m-%d')
         
         for task_id, task_info in list(self.missed_tasks.items()):
+            if task_id in self.executed_tasks:
+                del self.missed_tasks[task_id]
+                continue
+            
             scan_id = task_info['scan_id']
             scan_name = task_info['scan_name']
             action = task_info['action']
@@ -518,20 +615,21 @@ class NessusScheduler:
             self.log(f"Retrying missed task: {action.upper()} - {scan_name} (Retry #{retry_count + 1}, {minutes_since_missed:.1f} min late)")
             
             if self.execute_action(scan_id, action, scan_name, is_retry=True):
-                # Mark as executed and remove from missed tasks
                 self.executed_tasks.add(task_id)
+                self.last_execution_times[task_id] = now.isoformat()
+                self.save_executed_tasks()
+                
                 del self.missed_tasks[task_id]
                 self.log(f"Successfully executed missed task: {task_id}")
                 
                 if action in ['stop', 'pause']:
                     self.scan_completion_status[scan_id] = True
             else:
-                # Increment retry count
                 self.missed_tasks[task_id]['retry_count'] += 1
                 self.log(f"Retry failed for: {task_id}")
     
     def check_and_execute_schedules(self):
-        """Monitor and execute schedules - RUNS CONTINUOUSLY"""
+        """Monitor and execute schedules"""
         now = datetime.now()
         current_time_str = now.strftime('%H:%M')
         current_second = now.second
@@ -549,21 +647,21 @@ class NessusScheduler:
             if minutes_until_next <= 5:
                 mode = "URGENT"
                 check_interval = CHECK_INTERVAL_URGENT
-                log_interval = 10  # Log every 10 seconds
+                log_interval = 10
             elif minutes_until_next <= 30:
                 mode = "NORMAL"
                 check_interval = CHECK_INTERVAL_NORMAL
-                log_interval = 60  # Log every 60 seconds
+                log_interval = 60
             else:
                 mode = "RELAXED"
                 check_interval = CHECK_INTERVAL_RELAXED
-                log_interval = 1200  # Log every 20 minutes
+                log_interval = 1200
         else:
             mode = "IDLE"
             check_interval = CHECK_INTERVAL_NORMAL
             log_interval = 60
         
-        # FORCE LOG AT SPECIFIED INTERVALS
+        # Log at specified intervals
         current_time = time.time()
         time_since_last_log = current_time - self.last_log_time
         
@@ -572,11 +670,11 @@ class NessusScheduler:
             should_log = True
             self.last_log_time = current_time
         
-        # DISPLAY LOG
+        # Display log
         if should_log:
             self.print_separator('-')
             timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
-            self.log(f"MONITORING ACTIVE | Windows System Time: {timestamp}")
+            self.log(f"MONITORING ACTIVE | System Time: {timestamp}")
             self.log(f"Mode: {mode}")
             
             # Show missed tasks being retried
@@ -603,7 +701,7 @@ class NessusScheduler:
             pending = self.get_pending_tasks_display()
             if pending:
                 self.log(f"\nPending Tasks Today ({len(pending)}):")
-                for task in pending[:5]:  # Show max 5
+                for task in pending[:5]:
                     self.log(f"  {task['time']} | {task['action'].upper()} | {task['scan_name']} | in {task['minutes_until']} min")
             
             self.print_separator('-')
@@ -617,34 +715,42 @@ class NessusScheduler:
             
             task_id = f"{today_date}_{scan_id}_{scheduled_time}_{action}"
             
+            if task_id in self.executed_tasks:
+                continue
+            
+            if task_id in self.last_execution_times:
+                last_exec = datetime.fromisoformat(self.last_execution_times[task_id])
+                if (now - last_exec).total_seconds() < 60:
+                    continue
+            
             scheduled_hour, scheduled_minute = map(int, scheduled_time.split(':'))
             
-            # Execute if in the right minute and first 30 seconds
             if (now.hour == scheduled_hour and 
                 now.minute == scheduled_minute and 
-                current_second < 30 and
-                task_id not in self.executed_tasks):
+                current_second < 30):
                 
                 self.log(f"TRIGGER DETECTED: {action.upper()} for {scan_name} at {scheduled_time}")
                 
                 if self.execute_action(scan_id, action, scan_name):
                     self.executed_tasks.add(task_id)
+                    self.last_execution_times[task_id] = now.isoformat()
+                    self.save_executed_tasks()
                     self.log(f"Task marked as completed: {task_id}")
                     
-                    # Remove from missed tasks if it was there
                     if task_id in self.missed_tasks:
                         del self.missed_tasks[task_id]
                     
                     if action in ['stop', 'pause']:
                         self.scan_completion_status[scan_id] = True
         
-        # Clean up old executed tasks
+        # Clean up old executed tasks (keep only today's)
         self.executed_tasks = {t for t in self.executed_tasks if t.startswith(today_date)}
+        self.last_execution_times = {k: v for k, v in self.last_execution_times.items() if k.startswith(today_date)}
         
         return check_interval
     
     def monitoring_loop(self):
-        """Background monitoring loop - RUNS CONTINUOUSLY"""
+        """Background monitoring loop"""
         self.log("Background monitoring thread started")
         
         while self.running:
@@ -655,11 +761,12 @@ class NessusScheduler:
                 self.log(f"Error in monitoring loop: {e}")
                 time.sleep(CHECK_INTERVAL_NORMAL)
 
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 def list_available_scans():
     """List all available scans"""
-    print("\n" + "="*80)
-    print("AVAILABLE SCANS")
-    print("="*80)
+    print_section("AVAILABLE SCANS")
     
     try:
         response = requests.post(
@@ -692,7 +799,7 @@ def list_available_scans():
                 
                 print(f"\nFound {len(scans)} scan(s)\n")
                 print(f"{'ID':<10} {'Name':<45} {'Status':<15}")
-                print("-"*80)
+                print("-" * 80)
                 
                 for scan in scans:
                     scan_id = scan.get('id')
@@ -700,7 +807,7 @@ def list_available_scans():
                     status = scan.get('status', 'N/A')
                     print(f"{scan_id:<10} {name:<45} {status:<15}")
                 
-                print("="*80)
+                print("=" * 80)
                 return scans
     except Exception as e:
         print(f"Error: {e}")
@@ -710,9 +817,7 @@ def setup_schedules():
     """Interactive schedule setup"""
     scheduler = NessusScheduler()
     
-    print("\n" + "="*80)
-    print("SCHEDULE SETUP WIZARD")
-    print("="*80)
+    print_section("SCHEDULE SETUP WIZARD")
     
     scans = list_available_scans()
     if not scans:
@@ -721,9 +826,7 @@ def setup_schedules():
     schedules = []
     
     while True:
-        print("\n" + "-"*80)
-        print("ADD SCHEDULE FOR A SCAN")
-        print("-"*80)
+        print_subsection("ADD SCHEDULE FOR A SCAN")
         
         try:
             scan_id_input = input("\nEnter Scan ID (or 'done' to finish, 'cancel' to exit): ").strip()
@@ -787,9 +890,7 @@ def setup_schedules():
     scheduler.schedules = schedules
     scheduler.save_schedules()
     
-    print("\n" + "="*80)
-    print("SCHEDULE SUMMARY")
-    print("="*80)
+    print_section("SCHEDULE SUMMARY")
     
     scan_groups = defaultdict(list)
     for sched in schedules:
@@ -801,7 +902,7 @@ def setup_schedules():
         for sched in sorted(sched_list, key=lambda x: x['time']):
             print(f"  - {sched['time']} : {sched['action'].upper()}")
     
-    print("="*80)
+    print("=" * 80)
 
 def run_scheduler():
     """Run the scheduler with continuous background monitoring"""
@@ -813,9 +914,8 @@ def run_scheduler():
         sys.exit(1)
     
     def signal_handler(sig, frame):
-        print("\n\n" + "="*80)
-        print("SCHEDULER STOPPED BY USER")
-        print("="*80)
+        print("\n")
+        print_banner("SCHEDULER STOPPED BY USER", '=')
         scheduler.running = False
         if scheduler.monitor_thread:
             scheduler.monitor_thread.join(timeout=2)
@@ -823,30 +923,45 @@ def run_scheduler():
     
     signal.signal(signal.SIGINT, signal_handler)
     
-    print("\n" + "="*80)
-    print("NESSUS SCHEDULER v4.1 - ACTIVE (WITH MISSED SCAN RETRY)")
-    print("="*80)
+    # Print startup banner
+    print("\n" + LOGO.format(version=VERSION))
+    print_banner("SCHEDULER ACTIVE", '=')
     
     scan_groups = defaultdict(list)
     for sched in scheduler.schedules:
         scan_groups[sched['scan_id']].append(sched)
     
-    print(f"Scans Monitored: {len(scan_groups)}")
-    print(f"Total Schedules: {len(scheduler.schedules)}")
-    print(f"\nMONITORING MODES:")
-    print(f"  Urgent: Check every 10s, Log every 10s (task <= 5 min)")
-    print(f"  Normal: Check every 1 min, Log every 1 min (5 < task <= 30 min)")
-    print(f"  Relaxed: Check every 20 min, Log every 20 min (task > 30 min)")
-    print(f"\nMISSED SCAN RETRY:")
-    print(f"  Retry Window: {RETRY_WINDOW_MINUTES} minutes")
-    print(f"  Retry Interval: Every {RETRY_CHECK_INTERVAL} seconds (1 minute)")
+    print(f"\n{'Scans Monitored:':<25} {len(scan_groups)}")
+    print(f"{'Total Schedules:':<25} {len(scheduler.schedules)}")
+    
+    print("\nMONITORING MODES:")
+    print(f"  {'Urgent:':<12} Check every 10s, Log every 10s (task <= 5 min)")
+    print(f"  {'Normal:':<12} Check every 1 min, Log every 1 min (5 < task <= 30 min)")
+    print(f"  {'Relaxed:':<12} Check every 20 min, Log every 20 min (task > 30 min)")
+    
+    print("\nMISSED SCAN RETRY:")
+    print(f"  {'Retry Window:':<20} {RETRY_WINDOW_MINUTES} minutes")
+    print(f"  {'Retry Interval:':<20} Every {RETRY_CHECK_INTERVAL} seconds (1 minute)")
     print(f"  If a scan is missed, it will be retried every minute for {RETRY_WINDOW_MINUTES} minutes")
-    print(f"\nLog File: {LOG_FILE}")
-    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    print("\nFEATURES:")
+    print("  [✓] Task completion persists across restarts")
+    print("  [✓] Duplicate execution prevention (60s cooldown)")
+    print("  [✓] Intelligent missed task detection")
+    print("  [✓] Automatic retry mechanism")
+    print("  [✓] Dynamic monitoring intervals")
+    print("  [✓] Skip completed/running scans")
+    
+    print(f"\n{'Log File:':<25} {LOG_FILE}")
+    print(f"{'Config File:':<25} {CONFIG_FILE}")
+    print(f"{'Schedule File:':<25} {SCHEDULE_FILE}")
+    print(f"{'Executed Tasks File:':<25} {EXECUTED_TASKS_FILE}")
+    print(f"{'Started:':<25} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
     print("\nMONITORING ACTIVE - Running in background")
     print("DO NOT CLOSE THIS WINDOW")
     print("Press Ctrl+C to stop")
-    print("="*80 + "\n")
+    print("=" * 80 + "\n")
     sys.stdout.flush()
     
     # Initialize last log time
@@ -873,7 +988,7 @@ def create_windows_task_scheduler():
         import win32com.client
     except ImportError:
         print("\npywin32 not installed!")
-        print("Install: pip install pywin32")
+        print("Install with: pip install pywin32")
         return
     
     if not os.path.exists(CONFIG_FILE):
@@ -884,16 +999,15 @@ def create_windows_task_scheduler():
         print("Schedules not found. Please run schedule setup first.")
         return
     
-    print("\n" + "="*80)
-    print("WINDOWS TASK SCHEDULER SETUP")
-    print("="*80)
+    print_section("WINDOWS TASK SCHEDULER SETUP")
     
     script_path = os.path.abspath(__file__)
     python_path = sys.executable
     script_dir = os.path.dirname(script_path)
     
-    print(f"\nScript: {script_path}")
-    print(f"Python: {python_path}")
+    print(f"\n{'Script Path:':<20} {script_path}")
+    print(f"{'Python Path:':<20} {python_path}")
+    print(f"{'Working Directory:':<20} {script_dir}")
     
     task_name = "NessusScheduler"
     
@@ -903,18 +1017,21 @@ def create_windows_task_scheduler():
         
         root_folder = scheduler.GetFolder('\\')
         
+        # Remove existing task if present
         try:
             root_folder.DeleteTask(task_name, 0)
-            print(f"\nRemoved existing task: {task_name}")
+            print(f"\n[✓] Removed existing task: {task_name}")
         except:
             pass
         
         task_def = scheduler.NewTask(0)
         
+        # Registration info
         reg_info = task_def.RegistrationInfo
-        reg_info.Description = "Nessus Scan Scheduler with Missed Scan Retry"
+        reg_info.Description = f"Nessus Automated Scheduler v{VERSION} - Professional Edition"
         reg_info.Author = os.getenv('USERNAME')
         
+        # Trigger: Time-based, repeating every 1 minute
         TASK_TRIGGER_TIME = 1
         trigger = task_def.Triggers.Create(TASK_TRIGGER_TIME)
         
@@ -924,12 +1041,14 @@ def create_windows_task_scheduler():
         trigger.Repetition.Interval = "PT1M"
         trigger.Repetition.Duration = ""
         
+        # Action: Execute Python script
         TASK_ACTION_EXEC = 0
         action = task_def.Actions.Create(TASK_ACTION_EXEC)
         action.Path = python_path
         action.Arguments = f'"{script_path}" --run'
         action.WorkingDirectory = script_dir
         
+        # Settings
         settings = task_def.Settings
         settings.Enabled = True
         settings.StartWhenAvailable = True
@@ -940,11 +1059,13 @@ def create_windows_task_scheduler():
         settings.MultipleInstances = 3
         settings.ExecutionTimeLimit = "PT1H"
         
+        # Principal: Run with highest privileges
         principal = task_def.Principal
         principal.UserId = os.getenv('USERNAME')
         principal.LogonType = 3
         principal.RunLevel = 1
         
+        # Register task
         TASK_CREATE_OR_UPDATE = 6
         TASK_LOGON_NONE = 0
         
@@ -957,33 +1078,122 @@ def create_windows_task_scheduler():
             TASK_LOGON_NONE
         )
         
-        print("\n" + "="*80)
-        print("SUCCESS!")
-        print("="*80)
+        print_section("SUCCESS!", '=')
         print(f"\nTask '{task_name}' created successfully!")
-        print("\nTask Details:")
-        print("  - Name: NessusScheduler")
-        print("  - Runs: Every 1 minute")
-        print(f"  - User: {os.getenv('USERNAME')}")
-        print("  - Privileges: Highest")
-        print(f"  - Missed Scan Retry: Enabled ({RETRY_WINDOW_MINUTES} min window)")
-        print("\nTo manage: Open Task Scheduler (taskschd.msc)")
-        print("="*80)
+        
+        print("\nTASK DETAILS:")
+        print(f"  {'Name:':<20} {task_name}")
+        print(f"  {'Version:':<20} v{VERSION} (Professional)")
+        print(f"  {'Runs:':<20} Every 1 minute")
+        print(f"  {'User:':<20} {os.getenv('USERNAME')}")
+        print(f"  {'Privileges:':<20} Highest")
+        print(f"  {'Missed Scan Retry:':<20} Enabled ({RETRY_WINDOW_MINUTES} min window)")
+        print(f"  {'Task Tracking:':<20} Persistent")
+        
+        print("\nMANAGEMENT:")
+        print("  Open Task Scheduler: Press Win+R, type 'taskschd.msc'")
+        print("  Task Location: Task Scheduler Library > NessusScheduler")
+        
+        print("\n" + "=" * 80)
         
     except Exception as e:
         print(f"\nError creating task: {e}")
-        print("Run this script as Administrator")
+        print("\nNOTE: Run this script as Administrator to create scheduled tasks")
 
+def display_current_schedules():
+    """Display currently configured schedules"""
+    if os.path.exists(SCHEDULE_FILE):
+        with open(SCHEDULE_FILE, 'r') as f:
+            data = json.load(f)
+            schedules = data.get('schedules', [])
+            
+            if schedules:
+                scan_groups = defaultdict(list)
+                for sched in schedules:
+                    scan_groups[sched['scan_id']].append(sched)
+                
+                print_section("CURRENT SCHEDULES")
+                print(f"\nTotal Scans: {len(scan_groups)}")
+                print(f"Total Schedules: {len(schedules)}\n")
+                
+                for scan_id, sched_list in scan_groups.items():
+                    scan_name = sched_list[0]['scan_name']
+                    print(f"Scan: {scan_name} (ID: {scan_id})")
+                    for sched in sorted(sched_list, key=lambda x: x['time']):
+                        print(f"  {sched['time']} | {sched['action'].upper()}")
+                    print()
+                
+                print("=" * 80)
+            else:
+                print("\nNo schedules found")
+    else:
+        print("\nNo schedule file found")
+
+def clear_executed_tasks():
+    """Clear executed tasks file"""
+    if os.path.exists(EXECUTED_TASKS_FILE):
+        confirm = input("\nThis will allow tasks to run again today. Continue? (yes/no): ").strip().lower()
+        if confirm == 'yes':
+            os.remove(EXECUTED_TASKS_FILE)
+            print(f"\n[✓] Cleared executed tasks file: {EXECUTED_TASKS_FILE}")
+            print("Tasks can now be executed again")
+        else:
+            print("Cancelled")
+    else:
+        print("\nNo executed tasks file found")
+
+def display_help():
+    """Display help and usage information"""
+    print_section("USAGE INFORMATION")
+    
+    print("\nCOMMAND LINE OPTIONS:")
+    print(f"  {'--setup':<20} Setup or edit scan schedules")
+    print(f"  {'--run':<20} Run scheduler manually (foreground)")
+    print(f"  {'--create-task':<20} Create Windows Task Scheduler entry")
+    print(f"  {'--clear-tasks':<20} Clear executed tasks (force re-run)")
+    print(f"  {'--help':<20} Display this help message")
+    
+    print("\nEXAMPLES:")
+    print(f"  python {os.path.basename(__file__)} --setup")
+    print(f"  python {os.path.basename(__file__)} --run")
+    print(f"  python {os.path.basename(__file__)} --create-task")
+    
+    print("\nWORKFLOW:")
+    print("  1. Run --setup to configure your scan schedules")
+    print("  2. Run --create-task to setup Windows Task Scheduler (automated)")
+    print("  3. Or run --run to start scheduler manually (foreground)")
+    
+    print("\nFILES:")
+    print(f"  {CONFIG_FILE:<30} Authentication configuration")
+    print(f"  {SCHEDULE_FILE:<30} Scan schedules")
+    print(f"  {EXECUTED_TASKS_FILE:<30} Completed tasks tracking")
+    print(f"  {LOG_FILE:<30} Execution logs")
+    
+    print("\n" + "=" * 80)
+
+# ============================================================================
+# MAIN FUNCTION
+# ============================================================================
 def main():
     """Main menu"""
-    print("="*80)
-    print("NESSUS AUTOMATED SCHEDULER v4.1 - WITH MISSED SCAN RETRY")
-    print("="*80)
-    print(f"Platform: {platform.system()}")
-    print(f"Python: {sys.version.split()[0]}")
-    print(f"Retry Window: {RETRY_WINDOW_MINUTES} minutes")
-    print("="*80)
+    print(LOGO.format(version=VERSION))
+    print_banner("NESSUS AUTOMATED SCHEDULER", '=')
     
+    print(f"\n{'Platform:':<20} {platform.system()}")
+    print(f"{'Python Version:':<20} {sys.version.split()[0]}")
+    print(f"{'Script Version:':<20} v{VERSION}")
+    
+    print("\nKEY FEATURES:")
+    print("  [✓] Automated scan scheduling with multiple actions")
+    print("  [✓] Intelligent missed task detection and retry")
+    print("  [✓] Persistent task tracking across restarts")
+    print("  [✓] Dynamic monitoring intervals (10s / 1m / 20m)")
+    print("  [✓] Windows Task Scheduler integration")
+    print("  [✓] Comprehensive logging with rotation")
+    
+    print("\n" + "=" * 80)
+    
+    # Handle command line arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == '--run':
             run_scheduler()
@@ -991,24 +1201,27 @@ def main():
             setup_schedules()
         elif sys.argv[1] == '--create-task':
             create_windows_task_scheduler()
+        elif sys.argv[1] == '--clear-tasks':
+            clear_executed_tasks()
+        elif sys.argv[1] == '--help':
+            display_help()
         else:
-            print("Usage:")
-            print("  python nessus_scheduler.py --setup         # Setup schedules")
-            print("  python nessus_scheduler.py --run           # Run scheduler")
-            print("  python nessus_scheduler.py --create-task   # Setup Task Scheduler")
+            print(f"\nUnknown option: {sys.argv[1]}")
+            display_help()
     else:
+        # Interactive menu
         while True:
-            print("\n" + "="*80)
-            print("MAIN MENU")
-            print("="*80)
+            print_section("MAIN MENU")
             print("1. Setup/Edit schedules")
             print("2. Run scheduler manually")
             print("3. Create Windows Task Scheduler")
             print("4. View current schedules")
-            print("5. Exit")
-            print("="*80)
+            print("5. Clear executed tasks (force re-run)")
+            print("6. Help")
+            print("7. Exit")
+            print("=" * 80)
             
-            choice = input("\nSelect option: ").strip()
+            choice = input("\nSelect option [1-7]: ").strip()
             
             if choice == '1':
                 setup_schedules()
@@ -1017,31 +1230,17 @@ def main():
             elif choice == '3':
                 create_windows_task_scheduler()
             elif choice == '4':
-                if os.path.exists(SCHEDULE_FILE):
-                    with open(SCHEDULE_FILE, 'r') as f:
-                        data = json.load(f)
-                        schedules = data.get('schedules', [])
-                        
-                        if schedules:
-                            scan_groups = defaultdict(list)
-                            for sched in schedules:
-                                scan_groups[sched['scan_id']].append(sched)
-                            
-                            print("\nCURRENT SCHEDULES:")
-                            for scan_id, sched_list in scan_groups.items():
-                                scan_name = sched_list[0]['scan_name']
-                                print(f"\nScan: {scan_name} (ID: {scan_id})")
-                                for sched in sorted(sched_list, key=lambda x: x['time']):
-                                    print(f"  - {sched['time']} : {sched['action'].upper()}")
-                        else:
-                            print("\nNo schedules found")
-                else:
-                    print("\nNo schedules found")
+                display_current_schedules()
             elif choice == '5':
-                print("\nGoodbye!")
+                clear_executed_tasks()
+            elif choice == '6':
+                display_help()
+            elif choice == '7':
+                print("\nThank you for using Nessus Automated Scheduler!")
+                print("=" * 80)
                 break
             else:
-                print("Invalid option")
+                print("\n[!] Invalid option. Please select 1-7")
 
 if __name__ == "__main__":
     main()

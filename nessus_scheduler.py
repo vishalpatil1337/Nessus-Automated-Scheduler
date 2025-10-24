@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Nessus Automated Scheduler - Fixed Version v4.0
+Nessus Automated Scheduler - Fixed Version v4.1
+Added: Automatic retry for missed scans within 10-minute window
 """
 
 import requests
@@ -10,10 +11,10 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
+from collections import defaultdict
 import platform
 import threading
 import signal
-from collections import defaultdict
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -32,6 +33,10 @@ CHECK_INTERVAL_URGENT = 10      # 10 seconds when task within 5 minutes
 CHECK_INTERVAL_NORMAL = 60      # 1 minute when task between 5-30 minutes
 CHECK_INTERVAL_RELAXED = 1200   # 20 minutes when task more than 30 minutes
 
+# Retry Configuration
+RETRY_WINDOW_MINUTES = 10       # Retry missed scans for 10 minutes
+RETRY_CHECK_INTERVAL = 60       # Check every 1 minute for missed scans
+
 # Log rotation settings
 LOG_FILE = "nessus_scheduler.log"
 MAX_LOG_SIZE = 5 * 1024 * 1024  # 5 MB
@@ -43,6 +48,7 @@ class NessusScheduler:
         self.api_token = None
         self.schedules = []
         self.executed_tasks = set()
+        self.missed_tasks = {}  # Track missed tasks with timestamp
         self.scan_completion_status = {}
         self.running = True
         self.last_log_time = 0
@@ -251,10 +257,18 @@ class NessusScheduler:
             return status == 'completed'
         return False
     
-    def execute_action(self, scan_id, action, scan_name="Unknown"):
+    def is_scan_running(self, scan_id):
+        """Check if scan is currently running"""
+        status_info = self.get_scan_status(scan_id)
+        if status_info:
+            status = status_info['status']
+            return status in ['running', 'processing']
+        return False
+    
+    def execute_action(self, scan_id, action, scan_name="Unknown", is_retry=False):
         """Execute scan action with retry and completion check"""
         
-        # Check if scan is already completed
+        # Check if scan is already completed (for launch actions)
         if action == 'launch':
             if self.is_scan_completed(scan_id):
                 current_status = self.get_scan_status(scan_id)
@@ -264,6 +278,19 @@ class NessusScheduler:
                     self.log(f"Scan: {scan_name} (ID: {scan_id})")
                     self.log(f"Status: {current_status['status'].upper()}")
                     self.log("Reason: Scan status is 'completed', skipping scheduled launch")
+                    self.print_separator()
+                    return False
+            
+            # Check if scan is already running
+            if self.is_scan_running(scan_id):
+                current_status = self.get_scan_status(scan_id)
+                if current_status:
+                    self.print_separator()
+                    self.log("SKIPPED - Scan Already Running")
+                    self.log(f"Scan: {scan_name} (ID: {scan_id})")
+                    self.log(f"Status: {current_status['status'].upper()}")
+                    self.log(f"Progress: {current_status['progress']}%")
+                    self.log("Reason: Scan is already running, skipping scheduled launch")
                     self.print_separator()
                     return False
         
@@ -285,7 +312,10 @@ class NessusScheduler:
         while retry_count < max_retries:
             try:
                 self.print_separator()
-                self.log(f"EXECUTING: {action.upper()}")
+                if is_retry:
+                    self.log(f"RETRY EXECUTION: {action.upper()}")
+                else:
+                    self.log(f"EXECUTING: {action.upper()}")
                 self.log(f"Scan: {scan_name} (ID: {scan_id})")
                 self.log(f"Action: {action.upper()}")
                 self.log(f"Attempt: {retry_count + 1}/{max_retries}")
@@ -411,12 +441,105 @@ class NessusScheduler:
         
         return sorted(pending_tasks, key=lambda x: x['minutes_until'])
     
+    def check_missed_tasks(self):
+        """Check for missed tasks within the retry window and attempt to execute them"""
+        now = datetime.now()
+        today_date = now.strftime('%Y-%m-%d')
+        current_minutes = now.hour * 60 + now.minute
+        
+        # Clean up old missed tasks that are beyond retry window
+        expired_tasks = []
+        for task_id, task_info in self.missed_tasks.items():
+            minutes_since_missed = (now - task_info['missed_time']).total_seconds() / 60
+            if minutes_since_missed > RETRY_WINDOW_MINUTES:
+                expired_tasks.append(task_id)
+                self.log(f"Retry window expired for: {task_id}")
+        
+        for task_id in expired_tasks:
+            del self.missed_tasks[task_id]
+        
+        # Check for new missed tasks
+        for schedule in self.schedules:
+            scan_id = schedule['scan_id']
+            scan_name = schedule.get('scan_name', f'Scan {scan_id}')
+            scheduled_time = schedule['time']
+            action = schedule['action']
+            
+            task_id = f"{today_date}_{scan_id}_{scheduled_time}_{action}"
+            
+            # Skip if already executed
+            if task_id in self.executed_tasks:
+                continue
+            
+            # Calculate time difference
+            scheduled_hour, scheduled_minute = map(int, scheduled_time.split(':'))
+            scheduled_minutes = scheduled_hour * 60 + scheduled_minute
+            
+            time_diff = current_minutes - scheduled_minutes
+            
+            # If task is past due but within retry window
+            if 0 < time_diff <= RETRY_WINDOW_MINUTES:
+                if task_id not in self.missed_tasks:
+                    # New missed task detected
+                    self.missed_tasks[task_id] = {
+                        'scan_id': scan_id,
+                        'scan_name': scan_name,
+                        'action': action,
+                        'scheduled_time': scheduled_time,
+                        'missed_time': now - timedelta(minutes=time_diff),
+                        'retry_count': 0
+                    }
+                    self.print_separator('!')
+                    self.log("MISSED TASK DETECTED!")
+                    self.log(f"Task: {action.upper()} - {scan_name}")
+                    self.log(f"Scheduled: {scheduled_time}")
+                    self.log(f"Missed by: {time_diff} minute(s)")
+                    self.log(f"Retry window: {RETRY_WINDOW_MINUTES} minutes")
+                    self.log("Will retry every minute until executed or window expires")
+                    self.print_separator('!')
+    
+    def retry_missed_tasks(self):
+        """Attempt to execute missed tasks"""
+        if not self.missed_tasks:
+            return
+        
+        now = datetime.now()
+        today_date = now.strftime('%Y-%m-%d')
+        
+        for task_id, task_info in list(self.missed_tasks.items()):
+            scan_id = task_info['scan_id']
+            scan_name = task_info['scan_name']
+            action = task_info['action']
+            scheduled_time = task_info['scheduled_time']
+            retry_count = task_info['retry_count']
+            
+            minutes_since_missed = (now - task_info['missed_time']).total_seconds() / 60
+            
+            self.log(f"Retrying missed task: {action.upper()} - {scan_name} (Retry #{retry_count + 1}, {minutes_since_missed:.1f} min late)")
+            
+            if self.execute_action(scan_id, action, scan_name, is_retry=True):
+                # Mark as executed and remove from missed tasks
+                self.executed_tasks.add(task_id)
+                del self.missed_tasks[task_id]
+                self.log(f"Successfully executed missed task: {task_id}")
+                
+                if action in ['stop', 'pause']:
+                    self.scan_completion_status[scan_id] = True
+            else:
+                # Increment retry count
+                self.missed_tasks[task_id]['retry_count'] += 1
+                self.log(f"Retry failed for: {task_id}")
+    
     def check_and_execute_schedules(self):
         """Monitor and execute schedules - RUNS CONTINUOUSLY"""
         now = datetime.now()
         current_time_str = now.strftime('%H:%M')
         current_second = now.second
         today_date = now.strftime('%Y-%m-%d')
+        
+        # Check for missed tasks and retry them
+        self.check_missed_tasks()
+        self.retry_missed_tasks()
         
         # Calculate time until next task
         minutes_until_next, next_task = self.get_time_until_next_task()
@@ -455,6 +578,13 @@ class NessusScheduler:
             timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
             self.log(f"MONITORING ACTIVE | Windows System Time: {timestamp}")
             self.log(f"Mode: {mode}")
+            
+            # Show missed tasks being retried
+            if self.missed_tasks:
+                self.log(f"\nMISSED TASKS BEING RETRIED ({len(self.missed_tasks)}):")
+                for task_id, task_info in self.missed_tasks.items():
+                    minutes_late = (now - task_info['missed_time']).total_seconds() / 60
+                    self.log(f"  {task_info['scheduled_time']} | {task_info['action'].upper()} | {task_info['scan_name']} | {minutes_late:.1f} min late | Retry #{task_info['retry_count']}")
             
             if minutes_until_next is not None:
                 if minutes_until_next == 0:
@@ -500,6 +630,10 @@ class NessusScheduler:
                 if self.execute_action(scan_id, action, scan_name):
                     self.executed_tasks.add(task_id)
                     self.log(f"Task marked as completed: {task_id}")
+                    
+                    # Remove from missed tasks if it was there
+                    if task_id in self.missed_tasks:
+                        del self.missed_tasks[task_id]
                     
                     if action in ['stop', 'pause']:
                         self.scan_completion_status[scan_id] = True
@@ -690,7 +824,7 @@ def run_scheduler():
     signal.signal(signal.SIGINT, signal_handler)
     
     print("\n" + "="*80)
-    print("NESSUS SCHEDULER - ACTIVE")
+    print("NESSUS SCHEDULER v4.1 - ACTIVE (WITH MISSED SCAN RETRY)")
     print("="*80)
     
     scan_groups = defaultdict(list)
@@ -699,11 +833,16 @@ def run_scheduler():
     
     print(f"Scans Monitored: {len(scan_groups)}")
     print(f"Total Schedules: {len(scheduler.schedules)}")
-    print(f"Urgent Mode: Check every 10s, Log every 10s (task <= 5 min)")
-    print(f"Normal Mode: Check every 1 min, Log every 1 min (5 < task <= 30 min)")
-    print(f"Relaxed Mode: Check every 20 min, Log every 20 min (task > 30 min)")
-    print(f"Log File: {LOG_FILE}")
-    print(f"\nStarted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\nMONITORING MODES:")
+    print(f"  Urgent: Check every 10s, Log every 10s (task <= 5 min)")
+    print(f"  Normal: Check every 1 min, Log every 1 min (5 < task <= 30 min)")
+    print(f"  Relaxed: Check every 20 min, Log every 20 min (task > 30 min)")
+    print(f"\nMISSED SCAN RETRY:")
+    print(f"  Retry Window: {RETRY_WINDOW_MINUTES} minutes")
+    print(f"  Retry Interval: Every {RETRY_CHECK_INTERVAL} seconds (1 minute)")
+    print(f"  If a scan is missed, it will be retried every minute for {RETRY_WINDOW_MINUTES} minutes")
+    print(f"\nLog File: {LOG_FILE}")
+    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("\nMONITORING ACTIVE - Running in background")
     print("DO NOT CLOSE THIS WINDOW")
     print("Press Ctrl+C to stop")
@@ -773,7 +912,7 @@ def create_windows_task_scheduler():
         task_def = scheduler.NewTask(0)
         
         reg_info = task_def.RegistrationInfo
-        reg_info.Description = "Nessus Scan Scheduler"
+        reg_info.Description = "Nessus Scan Scheduler with Missed Scan Retry"
         reg_info.Author = os.getenv('USERNAME')
         
         TASK_TRIGGER_TIME = 1
@@ -827,6 +966,7 @@ def create_windows_task_scheduler():
         print("  - Runs: Every 1 minute")
         print(f"  - User: {os.getenv('USERNAME')}")
         print("  - Privileges: Highest")
+        print(f"  - Missed Scan Retry: Enabled ({RETRY_WINDOW_MINUTES} min window)")
         print("\nTo manage: Open Task Scheduler (taskschd.msc)")
         print("="*80)
         
@@ -837,10 +977,11 @@ def create_windows_task_scheduler():
 def main():
     """Main menu"""
     print("="*80)
-    print("NESSUS AUTOMATED SCHEDULER v4.0 - FIXED VERSION")
+    print("NESSUS AUTOMATED SCHEDULER v4.1 - WITH MISSED SCAN RETRY")
     print("="*80)
     print(f"Platform: {platform.system()}")
     print(f"Python: {sys.version.split()[0]}")
+    print(f"Retry Window: {RETRY_WINDOW_MINUTES} minutes")
     print("="*80)
     
     if len(sys.argv) > 1:

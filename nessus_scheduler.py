@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
 Nessus Automated Scheduler - Professional Edition v4.2
-Author: Security Automation Team
 Description: Automated scheduling system for Nessus vulnerability scans with 
              intelligent retry logic and persistent task tracking.
-License: MIT
 """
 
 import requests

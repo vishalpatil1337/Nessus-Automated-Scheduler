@@ -30,8 +30,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # CONFIGURATION
 # ============================================================================
 NESSUS_URL = "https://127.0.0.1:8834"
-USERNAME = "Nessus_Username"    # Enter Nessus Username Here
-PASSWORD = "Nessus_Password"    # Enter Nessus Password Here
+USERNAME = "XYZ"    # Enter Nessus Username Here
+PASSWORD = "XYZ@123"    # Enter Nessus Password Here
 CONFIG_FILE = "nessus_config.json"
 SCHEDULE_FILE = "nessus_schedule.json"
 EXECUTED_TASKS_FILE = "executed_tasks.json"
@@ -58,17 +58,9 @@ VERSION = "4.3"
 # ============================================================================
 # ASCII LOGO
 # ============================================================================
-LOGO = """
-  _   _                           _____      _              _       _           
- | \ | |                         / ____|    | |            | |     | |          
- |  \| | ___  ___ ___ _   _ ___ | (___   ___| |__   ___  __| |_   _| | ___ _ __ 
- | . ` |/ _ \/ __/ __| | | / __|  \___ \ / __| '_ \ / _ \/ _` | | | | |/ _ \ '__|
- | |\  |  __/\__ \__ \ |_| \__ \  ____) | (__| | | |  __/ (_| | |_| | |  __/ |   
- |_| \_|\___||___/___/\__,_|___/ |_____/ \___|_| |_|\___|\__,_|\__,_|_|\___|_|   
-                                                                                  
-     Automated Vulnerability Scan Scheduling System v{version}
-     Released: {release_date} | License: MIT
+LOGO = """NESSUS SCHEDULER
 """
+
 # ============================================================================
 # SINGLE INSTANCE LOCK
 # ============================================================================
